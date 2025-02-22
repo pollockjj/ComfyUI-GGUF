@@ -31,11 +31,13 @@ def get_weight(tensor, dtype, dequant_dtype=None, patch_dtype=None):
         if isinstance(key, (list, tuple)):
             for sub_key in key:
                 local_count = global_op_counter % TOTAL_GROUP
-                print(f"Operation {global_op_counter}/{TOTAL_GLOBAL}, {local_count}/{TOTAL_GROUP}: key: {sub_key}")
+                if local_count < 2:
+                    print(f"Operation {global_op_counter}/{TOTAL_GLOBAL}, {local_count}/{TOTAL_GROUP}: key: {sub_key}")
                 global_op_counter += 1
         else:
             local_count = global_op_counter % TOTAL_GROUP
-            print(f"Operation {global_op_counter}/{TOTAL_GLOBAL}, {local_count}/{TOTAL_GROUP}: key: {key}")
+            if local_count < 2:
+                print(f"Operation {global_op_counter}/{TOTAL_GLOBAL}, {local_count}/{TOTAL_GROUP}: key: {key}")
             global_op_counter += 1
         patch_list += move_patch_to_device(patches_item, device)
     weight = dequantize_tensor(tensor, dtype, dequant_dtype)
