@@ -6,6 +6,15 @@ import comfy.model_management
 from .dequant import dequantize_tensor, is_quantized
 from .ggml_weight_utils import get_weight as get_weight_util
 
+# to avoid breaking really old pytorch versions
+if hasattr(torch, "compiler") and hasattr(torch.compiler, "disable"):
+    torch_compiler_disable = torch.compiler.disable
+else:
+    def torch_compiler_disable(*args, **kwargs):
+        def noop(x):
+            return x
+        return noop
+
 class GGMLTensor(torch.Tensor):
     def __init__(self, *args, tensor_type, tensor_shape, patches=[], **kwargs):
         super().__init__()
@@ -108,6 +117,7 @@ class GGMLLayer(torch.nn.Module):
     def get_weight(self, tensor, dtype):
         return get_weight_util(tensor, dtype, self.dequant_dtype, self.patch_dtype)
 
+    @torch_compiler_disable()
     def cast_bias_weight(s, input=None, dtype=None, device=None, bias_dtype=None):
         if input is not None:
             if dtype is None:
