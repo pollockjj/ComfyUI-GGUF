@@ -10,9 +10,8 @@ except ImportError:
     GGMLTensor = None
 
 
-ggml_tensor_pointers = {}
-dequant_cache = None
-final_cache = None
+cached_tensors = {}
+cached_tensor = None
 patch_cache = {}
 
 def move_patch_to_device(item, device):
@@ -42,75 +41,43 @@ def compute_size(item):
         return 0
 
 def get_weight(tensor, dtype, dequant_dtype=None, patch_dtype=None):
-    global ggml_tensor_pointers, dequant_cache, final_cache
+    global cached_tensors, dequant_cache, cached_tensor
 
     if tensor is None:
         return None
 
-    ggml_layer_pointer = tensor.data_ptr()
+    if cached_tensor is None:
+        cache_final_weight = True
+    else:
+        cache_final_weight = False
 
-    # Register the tensor's original pointer with placeholders for the dequantized and patched tensor references.
-    if ggml_layer_pointer not in ggml_tensor_pointers:
-        ggml_tensor_pointers[ggml_layer_pointer] = {
-            'dequant_tensor': None,
-            'final_tensor': None
-        }
+    ggml_tensor_ptr = tensor.data_ptr()
     
+    if ggml_tensor_ptr in cached_tensors:
+        weight = cached_tensors[ggml_tensor_ptr]['final_tensor']().clone()
+        print(f"HIT")
+        return weight
+
     patch_list = []
     device = tensor.device
     patches_data = getattr(tensor, "patches", [])
     for function, patches_item, key in patches_data:
         patch_result = retrieve_cached_patch(patches_item, device, key)
         patch_list += patch_result
-    
-    
-    
-    if dequant_cache is None:
-        weight = dequantize_tensor(tensor, dtype, dequant_dtype)
-        dequant_cache = weight.clone()
-        for pointer in ggml_tensor_pointers:
-            if pointer == ggml_layer_pointer:
-                ggml_tensor_pointers[ggml_layer_pointer]['dequant_tensor'] = weakref.ref(dequant_cache)
-                print(f"DEQUANT_CACHED")
-                break
-    for pointer in ggml_tensor_pointers:
-        if pointer == ggml_layer_pointer:
-            if ggml_tensor_pointers[ggml_layer_pointer]['dequant_tensor'] is not None:
-                weight = ggml_tensor_pointers[ggml_layer_pointer]['dequant_tensor']().clone()
-                print(f"HIT DEQUANT")
-                break
-            else:
-                weight = dequantize_tensor(tensor, dtype, dequant_dtype)
-                break       
+
+    weight = dequantize_tensor(tensor, dtype, dequant_dtype)
     if GGMLTensor is not None and isinstance(weight, GGMLTensor):
         weight.__class__ = torch.Tensor
     if patch_list:
-        if final_cache is None:
-            if patch_dtype is None:
-                weight = function(patch_list, weight, key)
-            else:
-                computed_patch_dtype = dtype if patch_dtype == "target" else patch_dtype
-                weight = function(patch_list, weight, key, computed_patch_dtype)
-            final_cache = weight.clone()
-            print(f"CLONED")
-            for pointer in ggml_tensor_pointers:
-                if pointer == ggml_layer_pointer:
-                    ggml_tensor_pointers[ggml_layer_pointer]['final_tensor'] = weakref.ref(final_cache)
-                    print(f"FINAL_CACHED")
-                    break
-        for pointer in ggml_tensor_pointers:
-            if pointer == ggml_layer_pointer:
-                if ggml_tensor_pointers[ggml_layer_pointer]['final_tensor'] is not None:
-                    weight = ggml_tensor_pointers[ggml_layer_pointer]['final_tensor']().clone()
-                    print(f"HIT FINAL")
-                else:
-                    if patch_dtype is None:
-                        weight = function(patch_list, weight, key)
-                    else:
-                        computed_patch_dtype = dtype if patch_dtype == "target" else patch_dtype
-                        weight = function(patch_list, weight, key, computed_patch_dtype)
-                    break       
-
-
-
+        if patch_dtype is None:
+            weight = function(patch_list, weight, key)
+        else:
+            computed_patch_dtype = dtype if patch_dtype == "target" else patch_dtype
+            weight = function(patch_list, weight, key, computed_patch_dtype)
+            
+    if cache_final_weight:
+        cached_tensor = weight.clone()
+        cached_tensors[ggml_tensor_ptr] = {'final_tensor': weakref.ref(cached_tensor)}
+        print(ggml_tensor_ptr, "CACHED")
+    
     return weight
