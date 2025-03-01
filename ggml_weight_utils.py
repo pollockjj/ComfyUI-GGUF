@@ -10,19 +10,19 @@ except ImportError:
 
 patch_cache = {}
 
-cached_tensors = {}
-cached_tensor_list = [] 
-
-prev_ggml_tensor_ptr = None
-
+cached_tensor_map = {}
+cached_tensors = []  # Global list for strong references
+prev_ggml_tensor_ptr = None # Global variable to track previous tensor key
 level_one_tensor = None
 
+# Create and initialize CUDA streams for cuda:0 and cuda:1
 cuda0_stream = torch.cuda.Stream(device="cuda:0")
 cuda1_stream = torch.cuda.Stream(device="cuda:1")
 
 
 @profile
 def move_patch_to_device(item, device):
+    # Select the appropriate stream based on the target device
     if "cuda:0" in str(device):
         stream = cuda0_stream
     elif "cuda:1" in str(device):
@@ -63,38 +63,36 @@ def compute_size(item):
 
 @profile
 def get_weight(tensor, dtype, dequant_dtype=None, patch_dtype=None):
-    global cached_tensors, cached_tensor_list, prev_ggml_tensor_ptr, level_one_tensor
+    global cached_tensor_map, cached_tensors, prev_ggml_tensor_ptr, level_one_tensor
 
     if tensor is None:
         return None
 
-    if len(cached_tensor_list) < 250:
+    if len(cached_tensors) < 250:
         cache_final_weight = True
     else:
         cache_final_weight = False
 
     ggml_tensor_ptr = tensor.data_ptr()
-    
-    ### bad area
 
-    if ggml_tensor_ptr in cached_tensors:
+    if ggml_tensor_ptr in cached_tensor_map: ## I either data in a level 1 (onboard) cache or a level 2 (other VRAM) cache
         if level_one_tensor is not None:
             weight = level_one_tensor
-        else:
-            weight = cached_tensors[ggml_tensor_ptr]['final_tensor']().clone()
-           
-        cached_tensors[prev_ggml_tensor_ptr]['level_one_weakref'] = cached_tensors[ggml_tensor_ptr]['final_tensor']
-            
-            
-        if  cached_tensors[ggml_tensor_ptr]['level_one_weakref'] is not None:
+            #print(f"DEBUG: Fetched final weight for GGML {ggml_tensor_ptr} from Level 1 Cache.")
+        else:    
+            weight = cached_tensor_map[ggml_tensor_ptr]['level_two_cache_location']().clone()
+            #print(f"DEBUG: Fetched final weight for GGML {ggml_tensor_ptr} from Level 2 Cache.")
+            cached_tensor_map[prev_ggml_tensor_ptr]['level_one_prefetch']=cached_tensor_map[ggml_tensor_ptr]['level_two_cache_location']
+            #print(f"DEBUG: Final weight for GGML {ggml_tensor_ptr} written to {prev_ggml_tensor_ptr}'s level_one_prefetch.")
+            prev_ggml_tensor_ptr = ggml_tensor_ptr  # initialize and/or update global variable
+        
+        if  cached_tensor_map[ggml_tensor_ptr]['level_one_prefetch'] is not None:
             with torch.cuda.stream(cuda1_stream):
-                new_level_one = (cached_tensors[ggml_tensor_ptr]['level_one_weakref']().clone().to("cuda:0", non_blocking=True))
+                new_level_one = (cached_tensor_map[ggml_tensor_ptr]['level_one_prefetch']().clone().to("cuda:0", non_blocking=True))
             level_one_tensor = new_level_one
-            print(f"DEBUG: Updated level_one_tensor for tensor ptr {ggml_tensor_ptr}.")
+            #print(f"DEBUG: Updated level_one_tensor with final weight for next GGML.")
         return weight
 
-    ### end bad areas
-    
     patch_list = []
     device = tensor.device
     patches_data = getattr(tensor, "patches", [])
@@ -113,10 +111,10 @@ def get_weight(tensor, dtype, dequant_dtype=None, patch_dtype=None):
             weight = function(patch_list, weight, key, computed_patch_dtype)
 
     if cache_final_weight:
-        with torch.cuda.stream(cuda1_stream):
-            cached_clone = weight.clone().to("cuda:1", non_blocking=True)
-        cached_tensor_list.append(cached_clone)
-        cached_tensors[ggml_tensor_ptr] = {'final_tensor': weakref.ref(cached_clone)}
-        prev_ggml_tensor_ptr = ggml_tensor_ptr
+        cloned_final_weight = weight.clone().to("cuda:1", non_blocking=False)
+        cached_tensors.append(cloned_final_weight)
+        #print(f"DEBUG: Cloned final weight for tensor ptr {ggml_tensor_ptr} and stored in Level 2 Cache on cuda:1.")
+        cached_tensor_map[ggml_tensor_ptr] = {'level_two_cache_location': weakref.ref(cloned_final_weight),'level_one_prefetch':None}
+        prev_ggml_tensor_ptr = ggml_tensor_ptr  # initialize and/or update global variable
 
     return weight
