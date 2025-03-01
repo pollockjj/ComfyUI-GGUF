@@ -1,7 +1,6 @@
 import torch
 import time
 import weakref
-
 from .dequant import dequantize_tensor
 
 try:
@@ -9,10 +8,10 @@ try:
 except ImportError:
     GGMLTensor = None
 
+patch_cache = {}
 
 cached_tensors = {}
-cached_tensor = None
-patch_cache = {}
+cached_tensor_list = []  # Added global list for strong references
 
 def move_patch_to_device(item, device):
     if isinstance(item, torch.Tensor):
@@ -41,12 +40,12 @@ def compute_size(item):
         return 0
 
 def get_weight(tensor, dtype, dequant_dtype=None, patch_dtype=None):
-    global cached_tensors, dequant_cache, cached_tensor
+    global cached_tensors, cached_tensor_list
 
     if tensor is None:
         return None
 
-    if cached_tensor is None:
+    if len(cached_tensor_list) < 2:
         cache_final_weight = True
     else:
         cache_final_weight = False
@@ -76,8 +75,9 @@ def get_weight(tensor, dtype, dequant_dtype=None, patch_dtype=None):
             weight = function(patch_list, weight, key, computed_patch_dtype)
             
     if cache_final_weight:
-        cached_tensor = weight.clone()
-        cached_tensors[ggml_tensor_ptr] = {'final_tensor': weakref.ref(cached_tensor)}
+        cached_clone = weight.clone()
+        cached_tensor_list.append(cached_clone)
+        cached_tensors[ggml_tensor_ptr] = {'final_tensor': weakref.ref(cached_clone)}
         print(ggml_tensor_ptr, "CACHED")
     
     return weight
