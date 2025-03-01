@@ -11,15 +11,18 @@ except ImportError:
 patch_cache = {}
 
 cached_tensors = {}
-cached_tensor_list = []  # Global list for strong references
+cached_tensor_list = [] 
 
-# Create and initialize CUDA streams for cuda:0 and cuda:1
+prev_ggml_tensor_ptr = None
+
+level_one_tensor = None
+
 cuda0_stream = torch.cuda.Stream(device="cuda:0")
 cuda1_stream = torch.cuda.Stream(device="cuda:1")
 
+
 @profile
 def move_patch_to_device(item, device):
-    # Select the appropriate stream based on the target device
     if "cuda:0" in str(device):
         stream = cuda0_stream
     elif "cuda:1" in str(device):
@@ -60,7 +63,7 @@ def compute_size(item):
 
 @profile
 def get_weight(tensor, dtype, dequant_dtype=None, patch_dtype=None):
-    global cached_tensors, cached_tensor_list
+    global cached_tensors, cached_tensor_list, prev_ggml_tensor_ptr, level_one_tensor
 
     if tensor is None:
         return None
@@ -72,10 +75,26 @@ def get_weight(tensor, dtype, dequant_dtype=None, patch_dtype=None):
 
     ggml_tensor_ptr = tensor.data_ptr()
     
+    ### bad area
+
     if ggml_tensor_ptr in cached_tensors:
-        weight = cached_tensors[ggml_tensor_ptr]['final_tensor']().clone()
+        if level_one_tensor is not None:
+            weight = level_one_tensor
+        else:
+            weight = cached_tensors[ggml_tensor_ptr]['final_tensor']().clone()
+           
+        cached_tensors[prev_ggml_tensor_ptr]['level_one_weakref'] = cached_tensors[ggml_tensor_ptr]['final_tensor']
+            
+            
+        if  cached_tensors[ggml_tensor_ptr]['level_one_weakref'] is not None:
+            with torch.cuda.stream(cuda1_stream):
+                new_level_one = (cached_tensors[ggml_tensor_ptr]['level_one_weakref']().clone().to("cuda:0", non_blocking=True))
+            level_one_tensor = new_level_one
+            print(f"DEBUG: Updated level_one_tensor for tensor ptr {ggml_tensor_ptr}.")
         return weight
 
+    ### end bad areas
+    
     patch_list = []
     device = tensor.device
     patches_data = getattr(tensor, "patches", [])
@@ -92,12 +111,12 @@ def get_weight(tensor, dtype, dequant_dtype=None, patch_dtype=None):
         else:
             computed_patch_dtype = dtype if patch_dtype == "target" else patch_dtype
             weight = function(patch_list, weight, key, computed_patch_dtype)
-            
+
     if cache_final_weight:
-        # Use the cuda:1 stream to move the cached tensor to cuda:1
         with torch.cuda.stream(cuda1_stream):
             cached_clone = weight.clone().to("cuda:1", non_blocking=True)
         cached_tensor_list.append(cached_clone)
         cached_tensors[ggml_tensor_ptr] = {'final_tensor': weakref.ref(cached_clone)}
-    
+        prev_ggml_tensor_ptr = ggml_tensor_ptr
+
     return weight
