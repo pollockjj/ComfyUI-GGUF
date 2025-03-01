@@ -68,25 +68,26 @@ def get_weight(tensor, dtype, dequant_dtype=None, patch_dtype=None):
     if tensor is None:
         return None
 
-    if len(cached_tensors) < 250:
+    if len(cached_tensors) % 4 == 0:
         cache_final_weight = True
     else:
         cache_final_weight = False
 
     ggml_tensor_ptr = tensor.data_ptr()
 
-    if ggml_tensor_ptr in cached_tensor_map: ## I either data in a level 1 (onboard) cache or a level 2 (other VRAM) cache
+    if ggml_tensor_ptr in cached_tensor_map: ## I am either data in a level 1 (onboard) cache or a level 2 (other VRAM) cache
         if level_one_tensor is not None:
             weight = level_one_tensor
             #print(f"DEBUG: Fetched final weight for GGML {ggml_tensor_ptr} from Level 1 Cache.")
         else:    
-            weight = cached_tensor_map[ggml_tensor_ptr]['level_two_cache_location']().clone()
+            with torch.cuda.stream(cuda1_stream):
+                weight = cached_tensor_map[ggml_tensor_ptr]['level_two_cache_location']().clone()
             #print(f"DEBUG: Fetched final weight for GGML {ggml_tensor_ptr} from Level 2 Cache.")
-            cached_tensor_map[prev_ggml_tensor_ptr]['level_one_prefetch']=cached_tensor_map[ggml_tensor_ptr]['level_two_cache_location']
+            cached_tensor_map[prev_ggml_tensor_ptr]['level_one_prefetch'] = cached_tensor_map[ggml_tensor_ptr]['level_two_cache_location']
             #print(f"DEBUG: Final weight for GGML {ggml_tensor_ptr} written to {prev_ggml_tensor_ptr}'s level_one_prefetch.")
             prev_ggml_tensor_ptr = ggml_tensor_ptr  # initialize and/or update global variable
         
-        if  cached_tensor_map[ggml_tensor_ptr]['level_one_prefetch'] is not None:
+        if cached_tensor_map[ggml_tensor_ptr]['level_one_prefetch'] is not None:
             with torch.cuda.stream(cuda1_stream):
                 new_level_one = (cached_tensor_map[ggml_tensor_ptr]['level_one_prefetch']().clone().to("cuda:0", non_blocking=True))
             level_one_tensor = new_level_one
@@ -111,10 +112,11 @@ def get_weight(tensor, dtype, dequant_dtype=None, patch_dtype=None):
             weight = function(patch_list, weight, key, computed_patch_dtype)
 
     if cache_final_weight:
-        cloned_final_weight = weight.clone().to("cuda:1", non_blocking=False)
+        with torch.cuda.stream(cuda1_stream):
+            cloned_final_weight = weight.clone().to("cuda:1", non_blocking=True)
         cached_tensors.append(cloned_final_weight)
         #print(f"DEBUG: Cloned final weight for tensor ptr {ggml_tensor_ptr} and stored in Level 2 Cache on cuda:1.")
-        cached_tensor_map[ggml_tensor_ptr] = {'level_two_cache_location': weakref.ref(cloned_final_weight),'level_one_prefetch':None}
+        cached_tensor_map[ggml_tensor_ptr] = {'level_two_cache_location': weakref.ref(cloned_final_weight), 'level_one_prefetch': None}
         prev_ggml_tensor_ptr = ggml_tensor_ptr  # initialize and/or update global variable
 
     return weight
