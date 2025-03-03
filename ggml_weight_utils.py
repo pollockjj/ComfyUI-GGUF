@@ -20,7 +20,6 @@ cuda0_stream = torch.cuda.Stream(device="cuda:0")
 cuda1_stream = torch.cuda.Stream(device="cuda:1")
 
 
-@profile
 def move_patch_to_device(item, device):
     # Select the appropriate stream based on the target device
     if "cuda:0" in str(device):
@@ -43,7 +42,6 @@ def move_patch_to_device(item, device):
     else:
         return item
 
-@profile
 def retrieve_cached_patch(patches_item, device, key):
     cache_key = tuple(key) if isinstance(key, (list, tuple)) else key
     if cache_key in patch_cache:
@@ -52,7 +50,6 @@ def retrieve_cached_patch(patches_item, device, key):
     patch_cache[cache_key] = patch
     return patch
 
-@profile
 def compute_size(item):
     if isinstance(item, torch.Tensor):
         return item.numel() * item.element_size()
@@ -61,7 +58,6 @@ def compute_size(item):
     else:
         return 0
 
-@profile
 def get_weight(tensor, dtype, dequant_dtype=None, patch_dtype=None):
     global cached_tensor_map, cached_tensors, prev_ggml_tensor_ptr, level_one_tensor
 
